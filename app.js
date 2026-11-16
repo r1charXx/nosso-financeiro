@@ -88,7 +88,13 @@ function startLiveSync(){
  const tables=['transactions','bills','goals','couple_settings','subscriptions','subscription_payments','goal_contributions','bill_recurrences'];
  const channel=db.channel('nosso-financeiro-sync-'+owner);
  for(const table of tables){
-   channel.on('postgres_changes',{event:'*',schema:'public',table,filter:'user_id=eq.'+owner},()=>scheduleLiveRefresh());
+   // INSERT/UPDATE mantêm o filtro por usuário.
+   for(const event of ['INSERT','UPDATE']){
+     channel.on('postgres_changes',{event,schema:'public',table,filter:'user_id=eq.'+owner},()=>scheduleLiveRefresh());
+   }
+   // DELETE geralmente só inclui a chave primária no payload.
+   // O aviso sem filtro apenas dispara um reload, que respeita o RLS.
+   channel.on('postgres_changes',{event:'DELETE',schema:'public',table},()=>scheduleLiveRefresh());
  }
  liveChannel=channel;
  liveStatus('Conectando…','busy');
