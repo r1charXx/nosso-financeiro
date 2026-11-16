@@ -44,10 +44,71 @@ function renderInsights(){
  categories.innerHTML=ordered.length?ordered.map(([name,amount],i)=>`<div class="category-item"><div class="category-heading"><span>${escapeHTML(name)}</span><b>${fmt(amount)} <small>· ${(amount/sum*100).toFixed(0)}%</small></b></div><div class="category-track"><span style="width:${amount/max*100}%;--bar-index:${i}"></span></div></div>`).join(''):'<div class="insight-empty">As categorias aparecem aqui quando você registrar despesas neste mês.</div>';
 }
 function quickTx(type){$('txForm').reset();$('txDate').value=localDate();$('txType').value=type;$('txDialog').showModal()}
-async function boot(){ $('month').value=selectedMonth;$('txDate').value=localDate();$('billDate').value=localDate();$('billMonth').value=selectedMonth;$('subMonth').value=selectedMonth;$('subDue').value=localDate();$('chartWeek').value=isoWeek(new Date());if(!ready){$('setupNotice').classList.remove('hide');$('loginForm').querySelector('button').disabled=true;$('signup').disabled=true;return}db=window.supabase.createClient(cfg.url,cfg.anonKey);let {data:{session},error:err}=await db.auth.getSession();if(err)error(err);if(session){user=session.user;showApp();try{await reload()}catch(e){error(e)}}db.auth.onAuthStateChange((event,session)=>{if(event==='SIGNED_IN'&&session){user=session.user;showApp();reload().catch(error)}if(event==='SIGNED_OUT'){user=null;showLogin()}})}
+
+/* Sincronização em tempo real entre dispositivos conectados à mesma conta. */
+let liveChannel=null,liveRefreshTimer=null,liveRefreshBusy=false,liveRefreshAgain=false;
+let liveLastSync=0,livePoll=null;
+function liveStatus(message,kind='idle'){
+ const el=$('syncStatus');if(!el)return;
+ el.textContent=message;el.dataset.state=kind;
+ el.title=kind==='online'?'Dados sincronizados com o Supabase':message;
+}
+async function liveRefresh(){
+ if(!user||document.visibilityState==='hidden')return;
+ if(liveRefreshBusy){liveRefreshAgain=true;return}
+ liveRefreshBusy=true;
+ liveStatus('Sincronizando…','busy');
+ try{
+   await reload();
+   liveLastSync=Date.now();
+   liveStatus('Atualizado agora','online');
+ }catch(e){
+   console.warn('Sincronização:',e);
+   liveStatus('Sem conexão · toque para tentar','error');
+ }finally{
+   liveRefreshBusy=false;
+   if(liveRefreshAgain){liveRefreshAgain=false;scheduleLiveRefresh(300)}
+ }
+}
+function scheduleLiveRefresh(delay=450){
+ if(!user)return;
+ clearTimeout(liveRefreshTimer);
+ liveRefreshTimer=setTimeout(liveRefresh,delay);
+}
+function stopLiveSync(){
+ clearTimeout(liveRefreshTimer);clearInterval(livePoll);
+ liveRefreshTimer=null;livePoll=null;liveLastSync=0;
+ if(liveChannel&&db){const old=liveChannel;liveChannel=null;db.removeChannel(old).catch(console.warn)}
+ liveStatus('Desconectado','idle');
+}
+function startLiveSync(){
+ stopLiveSync();
+ if(!db||!user)return;
+ const owner=user.id;
+ const tables=['transactions','bills','goals','couple_settings','subscriptions','subscription_payments','goal_contributions','bill_recurrences'];
+ const channel=db.channel('nosso-financeiro-sync-'+owner);
+ for(const table of tables){
+   channel.on('postgres_changes',{event:'*',schema:'public',table,filter:'user_id=eq.'+owner},()=>scheduleLiveRefresh());
+ }
+ liveChannel=channel;
+ liveStatus('Conectando…','busy');
+ channel.subscribe(status=>{
+   if(channel!==liveChannel)return;
+   if(status==='SUBSCRIBED')liveStatus('Tempo real ativo','online');
+   else if(status==='CHANNEL_ERROR'||status==='TIMED_OUT')liveStatus('Sincronização periódica ativa','idle');
+ });
+ // Segurança extra: atualiza periodicamente se a publicação Realtime não estiver habilitada.
+ livePoll=setInterval(()=>{if(document.visibilityState==='visible'&&Date.now()-liveLastSync>25000)scheduleLiveRefresh(100)},30000);
+}
+document.addEventListener('visibilitychange',()=>{
+ if(document.visibilityState==='visible'&&user)scheduleLiveRefresh(200);
+});
+window.addEventListener('online',()=>{if(user){startLiveSync();scheduleLiveRefresh(150)}});
+window.addEventListener('offline',()=>liveStatus('Sem internet','error'));
+async function boot(){ $('month').value=selectedMonth;$('txDate').value=localDate();$('billDate').value=localDate();$('billMonth').value=selectedMonth;$('subMonth').value=selectedMonth;$('subDue').value=localDate();$('chartWeek').value=isoWeek(new Date());if(!ready){$('setupNotice').classList.remove('hide');$('loginForm').querySelector('button').disabled=true;$('signup').disabled=true;return}db=window.supabase.createClient(cfg.url,cfg.anonKey);let {data:{session},error:err}=await db.auth.getSession();if(err)error(err);if(session){user=session.user;showApp();try{await reload();liveLastSync=Date.now()}catch(e){error(e)}startLiveSync()}db.auth.onAuthStateChange((event,session)=>{if(event==='SIGNED_IN'&&session){const changed=user?.id!==session.user.id;user=session.user;showApp();if(changed)startLiveSync();scheduleLiveRefresh(150)}if(event==='SIGNED_OUT'){stopLiveSync();user=null;showLogin()}})}
 $('loginForm').onsubmit=async e=>{e.preventDefault();try{let {error:err}=await db.auth.signInWithPassword({email:$('email').value,password:$('password').value});if(err)throw err}catch(e){error(e)}};
 $('signup').onclick=async()=>{if(!$('email').value||$('password').value.length<6){toast('Informe e-mail e senha com pelo menos 6 caracteres.');return}try{let {error:err}=await db.auth.signUp({email:$('email').value,password:$('password').value});if(err)throw err;toast('Cadastro criado! Confira seu e-mail se a confirmação estiver ativa.')}catch(e){error(e)}};
-$('logout').onclick=()=>db.auth.signOut();document.querySelectorAll('[data-page]').forEach(x=>x.onclick=()=>page(x.dataset.page));document.querySelectorAll('[data-go]').forEach(x=>x.onclick=()=>page(x.dataset.go));$('month').onchange=e=>{selectedMonth=e.target.value;$('billMonth').value=selectedMonth;$('subMonth').value=selectedMonth;render()};$('billMonth').onchange=async()=>{try{await ensureRecurringBills();renderBills()}catch(e){error(e)}};$('billHistory').onchange=renderBills;$('chartPeriod').onchange=()=>{$('chartWeek').classList.toggle('hide',$('chartPeriod').value!=='week');renderFinance()};$('chartWeek').onchange=renderFinance;$('subMonth').onchange=renderSubscriptions;$('subFilter').onchange=renderSubscriptions;$('search').oninput=renderTransactions;$('filter').onchange=renderTransactions;$('quickAdd').onclick=$('addTx').onclick=()=>{$('txDialog').showModal()};$('addBill').onclick=()=>openBill();document.querySelectorAll('[data-bill-tab]').forEach(btn=>btn.onclick=()=>{billTab=btn.dataset.billTab;renderBills()});$('addGoal').onclick=()=>{editingGoal=null;$('goalForm').reset();$('goalSaved').value='0';$('goalDialogTitle').textContent='Nova meta';$('goalDialog').showModal()};$('addSubscription').onclick=()=>openSubscription();document.querySelectorAll('[data-close]').forEach(x=>x.onclick=()=>x.closest('dialog').close());document.querySelectorAll('dialog').forEach(x=>x.onclick=e=>{if(e.target===x)x.close()});
+$('syncStatus').onclick=()=>scheduleLiveRefresh(0);$('logout').onclick=()=>db.auth.signOut();document.querySelectorAll('[data-page]').forEach(x=>x.onclick=()=>page(x.dataset.page));document.querySelectorAll('[data-go]').forEach(x=>x.onclick=()=>page(x.dataset.go));$('month').onchange=e=>{selectedMonth=e.target.value;$('billMonth').value=selectedMonth;$('subMonth').value=selectedMonth;render()};$('billMonth').onchange=async()=>{try{await ensureRecurringBills();renderBills()}catch(e){error(e)}};$('billHistory').onchange=renderBills;$('chartPeriod').onchange=()=>{$('chartWeek').classList.toggle('hide',$('chartPeriod').value!=='week');renderFinance()};$('chartWeek').onchange=renderFinance;$('subMonth').onchange=renderSubscriptions;$('subFilter').onchange=renderSubscriptions;$('search').oninput=renderTransactions;$('filter').onchange=renderTransactions;$('quickAdd').onclick=$('addTx').onclick=()=>{$('txDialog').showModal()};$('addBill').onclick=()=>openBill();document.querySelectorAll('[data-bill-tab]').forEach(btn=>btn.onclick=()=>{billTab=btn.dataset.billTab;renderBills()});$('addGoal').onclick=()=>{editingGoal=null;$('goalForm').reset();$('goalSaved').value='0';$('goalDialogTitle').textContent='Nova meta';$('goalDialog').showModal()};$('addSubscription').onclick=()=>openSubscription();document.querySelectorAll('[data-close]').forEach(x=>x.onclick=()=>x.closest('dialog').close());document.querySelectorAll('dialog').forEach(x=>x.onclick=e=>{if(e.target===x)x.close()});
 $('txForm').onsubmit=async e=>{e.preventDefault();try{await mutate(db.from('transactions').insert({user_id:user.id,type:$('txType').value,person:$('txPerson').value,description:$('txDescription').value.trim(),amount:Number($('txAmount').value),category:$('txCategory').value,date:$('txDate').value}),'Lançamento salvo!');e.target.reset();$('txDate').value=localDate();$('txDialog').close()}catch(e){error(e)}};
 $('billForm').onsubmit=saveBill;
 $('goalForm').onsubmit=saveGoal;$('subscriptionForm').onsubmit=saveSubscription;
