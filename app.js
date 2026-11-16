@@ -176,5 +176,54 @@ function vapidBytes(base64){const padding='='.repeat((4-base64.length%4)%4);cons
 async function updatePushUI(){const status=$('pushStatus');if(!status)return;if(!pushSupported()){status.textContent='Este navegador não oferece notificações push.';return}if(!pushPublicKey()){status.textContent='Aguardando a configuração da chave pública VAPID.';return}if(!user){status.textContent='Entre na conta para configurar notificações.';return}try{const reg=await navigator.serviceWorker.ready;const sub=await reg.pushManager.getSubscription();status.textContent=sub?'Notificações ativadas neste aparelho.':'Notificações desativadas neste aparelho.'}catch(e){status.textContent='Não foi possível verificar as notificações.'}}
 async function enablePushNotifications(){try{if(!pushSupported())throw Error('Notificações push indisponíveis neste navegador.');if(!pushPublicKey())throw Error('Configure primeiro a chave pública VAPID.');if(!user)throw Error('Entre na conta primeiro.');const permission=await Notification.requestPermission();if(permission!=='granted')throw Error('Permissão de notificações não concedida.');const reg=await navigator.serviceWorker.ready;let sub=await reg.pushManager.getSubscription();if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:vapidBytes(pushPublicKey())});const record={user_id:user.id,endpoint:sub.endpoint,subscription:sub.toJSON(),updated_at:new Date().toISOString()};const {error:e}=await db.from('push_subscriptions').upsert(record,{onConflict:'endpoint'});if(e)throw e;toast('Notificações ativadas neste celular!');await updatePushUI()}catch(e){error(e)}}
 async function disablePushNotifications(){try{const reg=await navigator.serviceWorker.ready;const sub=await reg.pushManager.getSubscription();if(sub){if(user){const {error:e}=await db.from('push_subscriptions').delete().eq('endpoint',sub.endpoint);if(e)throw e}await sub.unsubscribe()}toast('Notificações desativadas neste celular.');await updatePushUI()}catch(e){error(e)}}
-async function sendPushEvent(payload){try{if(!db||!user)return;const reg=pushSupported()?await navigator.serviceWorker.ready:null;const localSub=reg?await reg.pushManager.getSubscription():null;const {data,error:e}=await db.functions.invoke('push-send',{body:{...payload,exclude_endpoint:payload.include_self?null:localSub?.endpoint}});if(e)throw e;toast(payload.type==='test'?'Teste enviado! Confira as notificações.':'');return data}catch(e){console.warn('Envio push:',e);if(payload.type==='test')error(e)}}
+
+async function sendPushEvent(payload) {
+  try {
+    if (!db || !user) return;
+
+    const { data: sessionData, error: sessionError } =
+      await db.auth.getSession();
+
+    if (sessionError) throw sessionError;
+
+    const token = sessionData?.session?.access_token;
+
+    if (!token) {
+      throw new Error('Sessão expirada. Entre novamente no aplicativo.');
+    }
+
+    const reg = pushSupported()
+      ? await navigator.serviceWorker.ready
+      : null;
+
+    const localSub = reg
+      ? await reg.pushManager.getSubscription()
+      : null;
+
+    const { data, error: e } = await db.functions.invoke('push-send', {
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      body: {
+        ...payload,
+        exclude_endpoint: payload.include_self
+          ? null
+          : localSub?.endpoint
+      }
+    });
+
+    if (e) throw e;
+
+    if (payload.type === 'test') {
+      toast('Teste enviado! Confira as notificações.');
+    }
+
+    return data;
+  } catch (e) {
+    console.warn('Envio push:', e);
+
+    if (payload.type === 'test') error(e);
+  }
+}
+
 boot().catch(error);
